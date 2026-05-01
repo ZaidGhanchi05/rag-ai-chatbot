@@ -1,0 +1,56 @@
+# docker-compose.yml
+# Run the full stack locally with Docker — no Python or Node install needed!
+#
+# Usage:
+#   docker-compose up --build       ← first time (builds images)
+#   docker-compose up               ← subsequent runs
+#   docker-compose down             ← stop everything
+#
+# Frontend → http://localhost:5173
+# Backend  → http://localhost:8000
+# API Docs → http://localhost:8000/docs
+
+version: "3.9"
+
+services:
+  # ── FastAPI Backend ───────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag_backend
+    ports:
+      - "8000:7860"         # map host:8000 → container:7860
+    volumes:
+      # Persist uploaded PDFs and FAISS index across restarts
+      - rag_uploads:/app/data/uploads
+      - rag_index:/app/data/index
+    environment:
+      - CHUNK_SIZE=500
+      - CHUNK_OVERLAP=50
+      - TOP_K=5
+      - CONFIDENCE_THRESHOLD=0.25
+      - UPLOAD_DIR=/app/data/uploads
+      - INDEX_DIR=/app/data/index
+    restart: unless-stopped   # auto-restart on crash
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── React Frontend ────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+    container_name: rag_frontend
+    ports:
+      - "5173:80"           # map host:5173 → nginx:80
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  rag_uploads:
+  rag_index:
