@@ -9,7 +9,7 @@ services:
     runtime: python
     rootDir: .
     buildCommand: pip install -r requirements.txt
-    startCommand: cd backend && uvicorn api:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn backend.api:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: CHUNK_SIZE
         value: "500"
@@ -27,7 +27,3 @@ services:
         value: "llama-3.1-8b-instant"
       - key: GROQ_API_KEY
         sync: false   # set manually in Render dashboard — never commit API keys!
-    disk:
-      name: rag-data
-      mountPath: /opt/render/project/src/data
-      sizeGB: 1

@@ -17,10 +17,17 @@ Architecture:
 
 import json
 import os
+import sys
 import uuid
 import logging
 from pathlib import Path
 from typing import Any
+
+# ── Path fix ─────────────────────────────────────────────────────────────────
+# When Render runs `uvicorn backend.api:app` from the repo root, the `backend/`
+# directory is not automatically on sys.path. This ensures all sibling imports
+# (vector_store, retrieval, llm) resolve correctly in all environments.
+sys.path.insert(0, str(Path(__file__).parent))
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
