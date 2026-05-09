@@ -1,10 +1,17 @@
 import { useState, useCallback } from "react";
-import { sendQuery } from "../services/api";
+import { streamQuery } from "../services/api";
 
 /**
  * useChat hook
- * Manages the conversation history and handles sending messages.
- * Implements a word-by-word typing animation to simulate streaming.
+ * Manages conversation history and handles sending messages.
+ *
+ * Uses REAL server-sent event (SSE) streaming from the backend:
+ *  1. Sends query to /query/stream
+ *  2. Receives a "meta" event immediately (sources, confidence, chunks)
+ *  3. Receives token events one-by-one as Groq generates the answer
+ *  4. Receives "done" event when streaming is complete
+ *
+ * This gives a genuine ChatGPT-like streaming experience.
  */
 export function useChat() {
   const [messages, setMessages] = useState([
@@ -12,7 +19,7 @@ export function useChat() {
       id: "welcome",
       role: "assistant",
       content:
-        "Hello! I'm your RAG AI assistant. Upload PDFs using the sidebar, then ask me anything about their content.",
+        "Hello! I'm your RAG AI assistant powered by Groq LLM. Upload PDFs using the sidebar, then ask me anything about their content.",
       sources: [],
       confidence: null,
       matched_chunks: [],
@@ -22,93 +29,102 @@ export function useChat() {
     },
   ]);
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState(null);
 
-  const sendMessage = useCallback(async (query) => {
-    if (!query.trim() || isLoading) return;
+  const sendMessage = useCallback(
+    async (query) => {
+      if (!query.trim() || isLoading) return;
 
-    // Add user message immediately
-    const userMsg = {
-      id: `user-${Date.now()}`,
-      role: "user",
-      content: query,
-      timestamp: new Date(),
-    };
-    setMessages((prev) => [...prev, userMsg]);
-    setIsLoading(true);
-    setError(null);
+      // ── Add user message immediately ──────────────────────────────────────
+      const userMsg = {
+        id: `user-${Date.now()}`,
+        role: "user",
+        content: query,
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, userMsg]);
+      setIsLoading(true);
 
-    try {
-      const data = await sendQuery(query);
-
-      // Add placeholder AI message that we'll "type" into
+      // ── Create empty AI message placeholder ───────────────────────────────
       const aiMsgId = `ai-${Date.now()}`;
-      const fullContent = data.answer;
-
       setMessages((prev) => [
         ...prev,
         {
           id: aiMsgId,
           role: "assistant",
-          content: "",           // starts empty — filled by typing animation
-          fullContent,
-          sources: data.sources || [],
-          confidence: data.confidence,
-          matched_chunks: data.matched_chunks || [],
-          low_confidence: data.low_confidence,
-          retrieval_method: data.retrieval_method,
-          timestamp: new Date(),
-          typing: true,
-        },
-      ]);
-
-      // Word-by-word reveal animation (simulates streaming)
-      const words = fullContent.split(" ");
-      let built = "";
-      for (let i = 0; i < words.length; i++) {
-        built += (i > 0 ? " " : "") + words[i];
-        const current = built;
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === aiMsgId ? { ...m, content: current } : m
-          )
-        );
-        // Variable delay for a natural feel
-        await sleep(i < 3 ? 60 : 30);
-      }
-
-      // Mark typing as done
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === aiMsgId ? { ...m, typing: false } : m
-        )
-      );
-    } catch (err) {
-      setError(err.message || "Something went wrong.");
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `err-${Date.now()}`,
-          role: "assistant",
-          content: `❌ Error: ${err.message}`,
+          content: "",
           sources: [],
           confidence: null,
           matched_chunks: [],
+          low_confidence: false,
+          retrieval_method: "",
           timestamp: new Date(),
-          isError: true,
+          typing: true,   // shows the blinking cursor / typing indicator
         },
       ]);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [isLoading]);
+
+      // ── Stream via SSE ────────────────────────────────────────────────────
+      await streamQuery(query, 5, {
+        // Metadata arrives first — populate sources/confidence before text
+        onMeta: (meta) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === aiMsgId
+                ? {
+                    ...m,
+                    sources: meta.sources || [],
+                    confidence: meta.confidence,
+                    matched_chunks: meta.matched_chunks || [],
+                    low_confidence: meta.low_confidence,
+                    retrieval_method: meta.retrieval_method,
+                  }
+                : m
+            )
+          );
+        },
+
+        // Each token appended to the message content in real time
+        onToken: (token) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === aiMsgId ? { ...m, content: m.content + token } : m
+            )
+          );
+        },
+
+        // Stream finished — remove typing cursor
+        onDone: () => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === aiMsgId ? { ...m, typing: false } : m
+            )
+          );
+          setIsLoading(false);
+        },
+
+        // Error — replace the empty placeholder with an error message
+        onError: (err) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === aiMsgId
+                ? {
+                    ...m,
+                    content: `❌ Error: ${err.message || "Something went wrong."}`,
+                    typing: false,
+                    isError: true,
+                  }
+                : m
+            )
+          );
+          setIsLoading(false);
+        },
+      });
+    },
+    [isLoading]
+  );
 
   const clearChat = useCallback(() => {
     setMessages((prev) => [prev[0]]); // keep welcome message
-    setError(null);
   }, []);
 
-  return { messages, isLoading, error, sendMessage, clearChat };
+  return { messages, isLoading, sendMessage, clearChat };
 }
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

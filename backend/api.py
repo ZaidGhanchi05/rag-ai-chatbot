@@ -15,6 +15,7 @@ Architecture:
   sentence-transformers embedding → FAISS index + sklearn TF-IDF retrieval
 """
 
+import json
 import os
 import uuid
 import logging
@@ -23,12 +24,14 @@ from typing import Any
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from pypdf import PdfReader
 from dotenv import load_dotenv
 
 from vector_store import get_vector_store
 from retrieval import hybrid_retrieve
+from llm import stream_answer
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 load_dotenv()
@@ -245,6 +248,64 @@ def query_documents(request: QueryRequest) -> QueryResponse:
     logger.info(f"Query: {request.query[:100]!r}")
     result = hybrid_retrieve(request.query, top_k=request.top_k)
     return QueryResponse(**result)
+
+
+class StreamQueryRequest(BaseModel):
+    query: str
+    top_k: int = TOP_K
+
+
+@app.post("/query/stream", tags=["Retrieval"])
+def query_documents_stream(request: StreamQueryRequest):
+    """
+    Stream a RAG answer token-by-token using Server-Sent Events (SSE).
+
+    First emits a JSON metadata event with sources/confidence/chunks,
+    then streams the LLM answer text, finally sends a [DONE] sentinel.
+
+    Frontend should consume this with the EventSource or fetch + ReadableStream API.
+    """
+    if not request.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty.")
+
+    logger.info(f"Stream query: {request.query[:100]!r}")
+
+    def event_generator():
+        # Step 1: retrieve context (fast, sync)
+        result = hybrid_retrieve(request.query, top_k=request.top_k)
+
+        # Step 2: emit metadata as first SSE event so the UI can show sources
+        # immediately before the answer starts streaming
+        meta = {
+            "type": "meta",
+            "sources": result["sources"],
+            "confidence": result["confidence"],
+            "matched_chunks": result["matched_chunks"],
+            "low_confidence": result["low_confidence"],
+            "retrieval_method": result["retrieval_method"],
+        }
+        yield f"data: {json.dumps(meta)}\n\n"
+
+        # Step 3: stream LLM tokens
+        for token in stream_answer(
+            request.query,
+            result["matched_chunks"],
+            result["low_confidence"],
+        ):
+            payload = json.dumps({"type": "token", "text": token})
+            yield f"data: {payload}\n\n"
+
+        # Step 4: signal completion
+        yield "data: {\"type\": \"done\"}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # disable nginx buffering
+        },
+    )
 
 
 @app.get("/documents", tags=["Documents"])

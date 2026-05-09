@@ -7,6 +7,10 @@ Hybrid retrieval engine combining:
 
 Final ranking score = 0.7 × semantic_score + 0.3 × tfidf_score
 
+After retrieval, the top chunks are passed to the Groq LLM (llm.py) which
+synthesizes a coherent, grounded answer. Falls back to raw chunk display when
+no GROQ_API_KEY is configured.
+
 Using scikit-learn here demonstrates ML engineering skills:
   • TfidfVectorizer  : classic NLP feature extraction
   • cosine_similarity: pairwise similarity from sklearn.metrics.pairwise
@@ -28,6 +32,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import normalize as sk_normalize
 
 from vector_store import get_vector_store
+from llm import generate_answer, stream_answer
 
 logger = logging.getLogger(__name__)
 
@@ -94,9 +99,12 @@ def hybrid_retrieve(query: str, top_k: int = TOP_K) -> dict[str, Any]:
     low_confidence = best_score < CONFIDENCE_THRESHOLD
 
     # ── Step 5 : Build structured response ───────────────────────────────────
-    answer = _build_answer(ranked, low_confidence)
     sources = _deduplicate_sources(ranked)
     matched_chunks = _format_chunks(ranked)
+
+    # ── Step 6 : LLM answer synthesis (Groq) ─────────────────────────────────
+    # generate_answer falls back to raw chunks if GROQ_API_KEY is not set
+    answer = generate_answer(query, matched_chunks, low_confidence)
 
     return {
         "answer": answer,
@@ -104,7 +112,7 @@ def hybrid_retrieve(query: str, top_k: int = TOP_K) -> dict[str, Any]:
         "confidence": round(best_score, 4),
         "matched_chunks": matched_chunks,
         "low_confidence": low_confidence,
-        "retrieval_method": "Hybrid (FAISS semantic + sklearn TF-IDF)",
+        "retrieval_method": "Hybrid (FAISS semantic + sklearn TF-IDF) → Groq LLM",
     }
 
 

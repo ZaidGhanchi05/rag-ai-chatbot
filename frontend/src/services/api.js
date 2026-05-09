@@ -1,5 +1,6 @@
 // API service layer
 // All calls to the FastAPI backend go through here
+// Supports both regular (sync) queries and real SSE streaming via /query/stream
 
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -74,4 +75,61 @@ export async function deleteDocument(docId) {
 export async function healthCheck() {
   const res = await fetch(`${BASE_URL}/health`);
   return res.json();
+}
+
+/**
+ * Stream a RAG answer via SSE from /query/stream.
+ *
+ * @param {string}   query     - User question
+ * @param {number}   topK      - Number of chunks to retrieve
+ * @param {object}   callbacks
+ * @param {function} callbacks.onMeta   - Called once with { sources, confidence, matched_chunks, ... }
+ * @param {function} callbacks.onToken  - Called for each streamed text token
+ * @param {function} callbacks.onDone   - Called when the stream is finished
+ * @param {function} callbacks.onError  - Called if an error occurs
+ */
+export async function streamQuery(query, topK = 5, { onMeta, onToken, onDone, onError } = {}) {
+  try {
+    const res = await fetch(`${BASE_URL}/query/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, top_k: topK }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `Stream query failed (${res.status})`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE lines end with \n\n; process complete events from the buffer
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop(); // keep any incomplete trailing chunk
+
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith("data:")) continue;
+        const jsonStr = line.slice(5).trim();
+        try {
+          const event = JSON.parse(jsonStr);
+          if (event.type === "meta" && onMeta) onMeta(event);
+          else if (event.type === "token" && onToken) onToken(event.text);
+          else if (event.type === "done" && onDone) onDone();
+        } catch {
+          // malformed event — skip silently
+        }
+      }
+    }
+  } catch (err) {
+    if (onError) onError(err);
+  }
 }
